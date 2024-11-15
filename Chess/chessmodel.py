@@ -148,13 +148,47 @@ def calculate_material(board):
 
     return white_material, black_material
 
-# load piece images
+# Load piece images
 def load_images():
-    pieces = ['p', 'n', 'b', 'r', 'q', 'k', 'P', 'N', 'B', 'R', 'Q', 'K']
-    for piece in pieces:
-        image = pygame.image.load(f'assets/black_pawn.png')
+    for piece, filename in PIECE_IMAGES.items():
+        image = pygame.image.load(f'assets/{filename}')
         image = pygame.transform.scale(image, (SQUARE_SIZE, SQUARE_SIZE))
         PIECE_IMAGES[piece] = image
+
+# Draw the chessboard
+def draw_board(window, board):
+    for row in range(8):
+        for col in range(8):
+            color = LIGHT_SQUARE if (row + col) % 2 == 0 else DARK_SQUARE
+            pygame.draw.rect(window, color, pygame.Rect(col * SQUARE_SIZE, row * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE))
+
+# Draw pieces on the board
+def draw_pieces(window, board):
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece:
+            piece_image = PIECE_IMAGES[piece.symbol()]
+            row = 7 - (square // 8)
+            col = square % 8
+            window.blit(piece_image, (col * SQUARE_SIZE, row * SQUARE_SIZE))
+
+# Handle user input for making moves
+def handle_click(board, selected_square, mouse_pos):
+    row, col = mouse_pos[1] // SQUARE_SIZE, mouse_pos[0] // SQUARE_SIZE
+    clicked_square = (7 - row) * 8 + col
+
+    if selected_square is None:
+        # First click: Select a piece
+        if board.piece_at(clicked_square) and board.piece_at(clicked_square).color == board.turn:
+            return clicked_square
+    else:
+        # Second click: Try to make a move
+        move = chess.Move(selected_square, clicked_square)
+        if move in board.legal_moves:
+            board.push(move)
+        return None  # Reset selection
+
+    return selected_square
 
 #Main Function
 if __name__ == "__main__":
@@ -163,8 +197,21 @@ if __name__ == "__main__":
     maxdepth = 18
     model = ThunderByteCNN()
     load_images()
+    selected_square = None
+    running = True
 
-    generate_board(board, maxdepth)
-    white_material, black_material = calculate_material(board)
-    print(white_material)
-    print(black_material)
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                mouse_pos = pygame.mouse.get_pos()
+                selected_square = handle_click(board, selected_square, mouse_pos)
+
+        # Draw the game
+        draw_board(WINDOW, board)
+        draw_pieces(WINDOW, board)
+        pygame.display.flip()
+
+    pygame.quit()
