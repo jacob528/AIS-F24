@@ -5,8 +5,9 @@ import pygame
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import os
 from torchvision import datasets, transforms
+import os
+from model import ThunderByteCNN
 
 # define piece images
 PIECE_IMAGES = {
@@ -37,99 +38,65 @@ pygame.display.set_caption("ThunderByte Chess")
 LIGHT_SQUARE = (240, 217, 181)
 DARK_SQUARE = (181, 136, 99)
 
-class ThunderByteCNN(nn.Module):
-    #Initialize the Convolutional Neural Network
-    def __init__(self):
-        #Calls the parent function (my CNN model) with the parameters and abilities of the nn.Module from pytorch
-        super(ThunderByteCNN, self).__init__()
-
-        #Create convolutional layers
-        self.convlayer1 = nn.Conv2d(14, 32, kernel_size=3, padding=1)
-        self.convlayer2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.convlayer3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-
-        # Define fully connected layers for final output
-        self.fc1 = nn.Linear(128 * 8 * 8, 256)
-        self.fc2 = nn.Linear(256, 1) #Output will be eval (between 0/1 tanh bounds)
-
-    #Forward (Forward Pass):
-    #Describes how to put each layer to input and what to output using (tanh (-1/1 output)
-    def forward(self):
-        x = torch.relu(self.convlayer1(x))
-        x = torch.relu(self.convlayer2(x))
-        x = torch.relu(self.convlayer3(x))
-        x = x.view(-1, 128 * 8 * 8)  # Flatten for fully connected layers
-        x = torch.relu(self.fc1(x))
-        x = torch.tanh(self.fc2(x))  # Output between -1 and 1
-        return x
-
 #Monte Carlo Tree Search Algorithm for Model
 #Allows the CNN to explore different random moves and figure out how good a move is (q values)
 #Makes the CNN play better in simple terms
 class MCTS:
-    #Initialize the model qith q values and visit counts
-    def __init__(self, model, simulations = 1000):
+    def __init__(self, model, simulations=1000):
         self.model = model
         self.simulations = simulations
-        self.q_values = {}  # Stores Q values for each board position
-        self.visit_counts = {}  # Tracks visit counts for each board position
-    
-    #Function to select amove based on the board
+        self.q_values = {}
+        self.visit_counts = {}
+
     def select_move(self, board):
-        # Run MCTS simulations
         for _ in range(self.simulations):
             self.simulate(board)
 
-        # Select the best move based on visit counts
         legal_moves = list(board.legal_moves)
         move_scores = {}
         for move in legal_moves:
             board.push(move)
             move_scores[move] = self.q_values.get(board.fen(), 0) / self.visit_counts.get(board.fen(), 1)
             board.pop()
-        
+
         best_move = max(move_scores, key=move_scores.get)
         return best_move
 
-    #Simulate a game
     def simulate(self, board):
         if board.is_game_over():
             return self.evaluate_terminal(board)
         
-        # Initialize Q and N for a new position
         board_fen = board.fen()
         if board_fen not in self.q_values:
             self.q_values[board_fen] = 0
             self.visit_counts[board_fen] = 0
             return self.evaluate(board)
-        
-        # Select a random legal move
+
         legal_moves = list(board.legal_moves)
         move = random.choice(legal_moves)
         board.push(move)
         reward = -self.simulate(board)
         board.pop()
 
-        # Update Q and N values
         self.q_values[board_fen] += reward
         self.visit_counts[board_fen] += 1
         return reward
 
-    #Evaluate the model based on material and nn eval
     def evaluate(self, board):
-        # Encode the board for the model
         board_tensor = encode_board(board)
-        with torch.no_grad():
-            nn_eval = self.model(board_tensor).item()
-        
-        # Blend the neural network evaluation with material evaluation
-        white_material, black_material = calculate_material(board)
-        material_eval = (white_material - black_material) / 10.0  # Normalize material scores
-        return nn_eval * 0.7 + material_eval * 0.3  # Weighted average
+        policy, nn_eval = self.model(board_tensor)
 
-    #Evaluate with tanh (-1/1)
+        # Convert policy to move probabilities
+        legal_moves = list(board.legal_moves)
+        move_probs = torch.softmax(policy, dim=1).squeeze(0)  # Softmax for move probabilities
+
+        # Calculate material evaluation
+        white_material, black_material = calculate_material(board)
+        material_eval = (white_material - black_material) / 10.0
+
+        return nn_eval.item() * 0.7 + material_eval * 0.3
+
     def evaluate_terminal(self, board):
-        # Terminal evaluation based on game outcome
         if board.is_checkmate():
             return -1  # Loss
         elif board.is_stalemate() or board.is_insufficient_material():
@@ -287,17 +254,65 @@ def calculate_material(board):
     return white_material, black_material
 
 #Self play function
-def self_play(model, iterations=10):
-    for _ in range(iterations):
-        board = chess.Board()
-        mcts = MCTS(model)
-        
-        while not board.is_game_over():
-            move = mcts.select_move(board)
-            board.push(move)
+def self_play(model, simulations=10):
+    board = chess.Board()
+    data = []
 
-        # Evaluate game result and update model weights here if using reinforcement learning
-        print(f"Game result: {board.result()}")
+    for _ in range(simulations):
+        if board.is_game_over():
+            break
+        encoded_board = encode_board(board)
+        
+        # Evaluate each move using the model and store move probabilities
+        move_evals = []
+        for move in board.legal_moves:
+            board.push(move)
+            policy, move_eval = model(encode_board(board))
+            move_evals.append((move, move_eval.item(), policy))
+            board.pop()
+
+        # Select the best move based on the neural network evaluation
+        best_move = max(move_evals, key=lambda x: x[1])[0]
+        best_policy = move_evals[0][2]  # Store the policy vector for the selected move
+
+        data.append((encoded_board, best_policy, board.result()))  # Store board, policy, and result
+        board.push(best_move)
+
+    return data
+
+
+#Training loop
+def train_model(model, optimizer, criterion, epochs=5, simulations=10):
+    for epoch in range(epochs):
+        print(f"Epoch {epoch + 1}/{epochs}")
+
+        training_data = []
+        for _ in range(simulations):
+            training_data.extend(self_play(model, simulations=1))
+
+        # Prepare dataset
+        X = torch.cat([x[0] for x in training_data])  # Encoded boards
+        policies = torch.stack([x[1] for x in training_data])  # Policy vectors
+        y = torch.tensor([1 if result == "1-0" else -1 if result == "0-1" else 0 for _, _, result in training_data])  # Game results
+
+        # Training step
+        optimizer.zero_grad()
+        
+        # Forward pass
+        predicted_policies, predicted_value = model(X)
+        
+        # Calculate policy loss (cross-entropy)
+        policy_loss = nn.CrossEntropyLoss()(predicted_policies, policies.argmax(dim=1))  # Argmax to get the target move
+        
+        # Calculate value loss (mean squared error)
+        value_loss = nn.MSELoss()(predicted_value.squeeze(), y.float())
+        
+        # Total loss
+        loss = policy_loss + value_loss
+        loss.backward()
+        optimizer.step()
+
+        print(f"Loss: {loss.item():.4f}")
 
 # load piece images
 def load_images():
