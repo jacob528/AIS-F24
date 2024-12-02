@@ -28,8 +28,12 @@ PIECE_IMAGES = {
 pygame.init()
 
 # set up display dimensions
-WIDTH, HEIGHT = 640, 512
-SQUARE_SIZE  = WIDTH // 8
+SQUARE_SIZE = 50
+BOARD_SIZE = SQUARE_SIZE * 8
+PANEL_WIDTH = 200
+PANEL_HEIGHT = BOARD_SIZE
+WIDTH = BOARD_SIZE + PANEL_WIDTH
+HEIGHT = BOARD_SIZE
 WINDOW = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("ThunderByte Chess")
 
@@ -182,7 +186,7 @@ def draw_board(window, board):
                         (file * SQUARE_SIZE, rank * SQUARE_SIZE)
                     )
 
-def draw_board_with_panel(window, board, player_input):
+def draw_board_with_panel(window, board, player_input, input_box, input_active):
     """
     Draw the chessboard and the side panel for player input.
     
@@ -204,14 +208,18 @@ def draw_board_with_panel(window, board, player_input):
                 window.blit(piece_image, (file * SQUARE_SIZE, rank * SQUARE_SIZE))
     
     # Draw the side panel
-    pygame.draw.rect(window, (50, 50, 50), (WIDTH - 128, 0, 128, HEIGHT))  # Background for panel
-    font = pygame.font.Font(None, 36)
+    pygame.draw.rect(window, (50, 50, 50), (BOARD_SIZE, 0, PANEL_WIDTH, PANEL_HEIGHT))  # Background for panel
+    font = pygame.font.Font(None, 28)
     text = font.render("Player Move:", True, (255, 255, 255))
-    window.blit(text, (WIDTH - 120, 20))
+    window.blit(text, (BOARD_SIZE + 10, 20))
+
+    # Draw the input box
+    box_color = (100, 100, 100) if input_active else (50, 50, 50)  # Change color if active
+    pygame.draw.rect(window, box_color, input_box)
     
     # Render player input
     input_text = font.render(player_input, True, (200, 200, 200))
-    window.blit(input_text, (WIDTH - 120, 60))
+    window.blit(input_text, (BOARD_SIZE + 10, 60))
 
 def handle_player_move(board, move_input):
     """
@@ -332,6 +340,11 @@ if __name__ == "__main__":
     board = chess.Board()
     load_images()
 
+    # Initialize input box and related variables
+    input_box = pygame.Rect(BOARD_SIZE + 10, 60, PANEL_WIDTH - 20, 40)
+    player_input = ""
+    input_active = False
+
     running = True
     while running:
         for event in pygame.event.get():
@@ -349,7 +362,7 @@ if __name__ == "__main__":
                     player_input += event.unicode  # Add typed character to input
         
         # Redraw the board and side panel
-        draw_board_with_panel(WINDOW, board, player_input)
+        draw_board_with_panel(WINDOW, board, player_input, input_box, input_active)
         pygame.display.flip()
     
     pygame.quit()
