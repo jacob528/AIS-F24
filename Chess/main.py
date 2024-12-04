@@ -329,14 +329,35 @@ def load_images():
 
 player_input = ""
 
+# Add this function to draw the button
+def draw_button(window, x, y, width, height, text):
+    """Draw a button with specified dimensions and text."""
+    pygame.draw.rect(window, (70, 130, 180), (x, y, width, height))  # Button background
+    font = pygame.font.Font(None, 24)
+    text_surface = font.render(text, True, (255, 255, 255))  # Button text
+    text_rect = text_surface.get_rect(center=(x + width // 2, y + height // 2))
+    window.blit(text_surface, text_rect)
+
+# Add this function to handle training
+def train_and_display_moves(model, optimizer, criterion, board, window):
+    """Train the model and display moves on the UI during training."""
+    training_data = self_play(model, simulations=10)  # Self-play for data generation
+
+    for data in training_data:
+        board_tensor, _, _ = data  # Extract board from data
+        board_copy = board.copy()
+        # Decode board_tensor back to a python-chess Board (if necessary)
+
+        # Draw the board to reflect moves
+        draw_board(window, board_copy)
+        pygame.display.flip()
+        pygame.time.wait(500)  # Delay to visualize the move
+
+    # Perform training step
+    train_model(model, optimizer, criterion, epochs=1, simulations=1)
+
 #Main Function
 if __name__ == "__main__":
-    #Define Board, depth and model
-    board = chess.Board()
-    maxdepth = 18
-    model = ThunderByteCNN()
-    load_images()
-
     # Check if assets folder exists
     if not os.path.exists('assets'):
         print("Error: 'assets' folder not found!")
@@ -346,6 +367,10 @@ if __name__ == "__main__":
     # Initialize the board and load images
     board = chess.Board()
     load_images()
+
+    model = ThunderByteCNN()
+    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    criterion = nn.MSELoss()
 
     running = True
     while running:
@@ -362,11 +387,15 @@ if __name__ == "__main__":
                     player_input = player_input[:-1]  # Remove last character
                 else:
                     player_input += event.unicode  # Add typed character to input
-        
-        # Redraw the board and side panel
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                # Check if mouse click is within the button bounds
+                mouse_x, mouse_y = event.pos
+                if 500 <= mouse_x <= 600 and 400 <= mouse_y <= 440:  # Button bounds
+                    train_and_display_moves(model, optimizer, criterion, board, WINDOW)
+
+        # Redraw the board, side panel, and button
         draw_board_with_panel(WINDOW, board, player_input)
+        draw_button(WINDOW, 500, 400, 100, 40, "Train")  # Button for training
         pygame.display.flip()
-    
-    pygame.quit()
 
     pygame.quit()
