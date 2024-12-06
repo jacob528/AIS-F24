@@ -29,14 +29,18 @@ PIECE_IMAGES = {
 pygame.init()
 
 # set up display dimensions
-WIDTH, HEIGHT = 640, 512
-SQUARE_SIZE  = WIDTH // 8
+SQUARE_SIZE = 64  # Each square is now 64x64 pixels
+BOARD_SIZE = SQUARE_SIZE * 8
+PANEL_WIDTH = 200
+WIDTH = BOARD_SIZE + PANEL_WIDTH
+HEIGHT = BOARD_SIZE
 WINDOW = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("ThunderByte Chess")
 
 # colors
 LIGHT_SQUARE = (240, 217, 181)
 DARK_SQUARE = (181, 136, 99)
+
 
 #Monte Carlo Tree Search Algorithm for Model
 #Allows the CNN to explore different random moves and figure out how good a move is (q values)
@@ -59,8 +63,16 @@ class MCTS:
             move_scores[move] = self.q_values.get(board.fen(), 0) / self.visit_counts.get(board.fen(), 1)
             board.pop()
 
-        best_move = max(move_scores, key=move_scores.get)
-        return best_move
+        # Retry if the selected move is illegal
+        best_move = None
+        while best_move is None or best_move not in legal_moves:
+            best_move = max(move_scores, key=move_scores.get)
+
+        if best_move in legal_moves:
+            return best_move
+        else:
+            raise ValueError(f"Illegal move selected: {best_move}")
+
 
     def simulate(self, board):
         if board.is_game_over():
@@ -73,7 +85,9 @@ class MCTS:
             return self.evaluate(board)
 
         legal_moves = list(board.legal_moves)
-        move = random.choice(legal_moves)
+        
+        # Ensure the selected move is legal
+        move = random.choice(legal_moves)  # Choose a legal move randomly
         board.push(move)
         reward = -self.simulate(board)
         board.pop()
@@ -171,10 +185,14 @@ def draw_board_with_panel(window, board, player_input):
                 window.blit(piece_image, (file * SQUARE_SIZE, rank * SQUARE_SIZE))
     
     # Draw the side panel
-    pygame.draw.rect(window, (50, 50, 50), (WIDTH - 128, 0, 128, HEIGHT))  # Background for panel
+    pygame.draw.rect(
+        window,
+        (50, 50, 50),  # Gray color
+        (BOARD_SIZE, 0, PANEL_WIDTH, HEIGHT)  # Spanning the right-hand side
+    )  # Background for panel
     font = pygame.font.Font(None, 36)
     text = font.render("Player Move:", True, (255, 255, 255))
-    window.blit(text, (WIDTH - 120, 20))
+    window.blit(text, (BOARD_SIZE + 20, 20))
     
     # Render player input
     input_text = font.render(player_input, True, (200, 200, 200))
@@ -197,33 +215,55 @@ def handle_player_move(board, move_input):
             board.push(move)
             return True
         else:
-            print("Illegal move!")
+            print(f"Illegal move: {move_input}")
             return False
     except ValueError:
         print("Invalid move format!")
         return False
 
+# load piece images
+def load_images():
+    for piece, filename in PIECE_IMAGES.items():
+        try:
+            # Load the image file associated with the piece
+            image = pygame.image.load(f'./assets/{filename}')
+            # Scale the image to fit the square size
+            image = pygame.transform.scale(image, (SQUARE_SIZE, SQUARE_SIZE))
+            # Update the dictionary with the Pygame surface
+            PIECE_IMAGES[piece] = image
+        except FileNotFoundError:
+            print(f"Error: Image file for {piece} not found at './assets/{filename}'!")
+
+player_input = ""
+
+# Add this function to draw the button
+# Add this function to draw the button
+def draw_button(window, x, y, width, height, text):
+    """Draw a button with specified dimensions and text."""
+    pygame.draw.rect(window, (90, 130, 180), (x, y, width, height))  # Button background
+    pygame.draw.rect(window, (50, 50, 50), (x, y, width, height), 2)  # Button border
+    font = pygame.font.Font(None, 28)
+    text_surface = font.render(text, True, (255, 255, 255))  # Button text
+    text_rect = text_surface.get_rect(center=(x + width // 2, y + height // 2))
+    window.blit(text_surface, text_rect)
+
+# Position button in the side panel
+button_x = BOARD_SIZE + 20  # Align with the side panel
+button_y = 120  # Below the Player Move text
+button_width = 160
+button_height = 40
 
 #Function to encode the different piece boards with 0s and 1s
 def encode_board(board):
-    # 14 planes, 8x8 board
-    # 12 planes for each piece on the board
-    # 1 board for current turn (all 0s is black, 1s is white)
-    # 1 board for castling rights/rules etc...
-    planes = torch.zeros((14, 8, 8))
-
-    #Loop through each square, check for pieces at each square, encode the planes with 0s and 1s
+    planes = torch.zeros((14, 8, 8))  # 14 planes for each piece type (12 pieces + 2 additional planes for empty squares)
     for square in chess.SQUARES:
         piece = board.piece_at(square)
         if piece:
-            plane = (piece.piece_type - 1) + (0 if piece.color == chess.WHITE else 6)
-            planes[plane, square // 8, square % 8] = 1
-        else:
-            # Optional: You can add a comment or logic here for clarity
-            pass  # No piece on this square, leave it as zeros
-    # After encoding, return planes with unsqueeze (which adds a dimension to the planes tensor)
-    return planes.unsqueeze(0)
-
+            piece_type = piece.piece_type - 1  # Piece type (1-6), so subtract 1 to index from 0
+            color_offset = 0 if piece.color == chess.WHITE else 6  # Offset for color (0 for white, 6 for black)
+            plane = piece_type + color_offset  # Determine the correct plane
+            planes[plane, square // 8, square % 8] = 1  # Mark the square with the piece type
+    return planes.unsqueeze(0)  # Add a batch dimension to the tensor
 
 #Determine the Material on both sides 
 def calculate_material(board):
@@ -253,108 +293,106 @@ def calculate_material(board):
 
     return white_material, black_material
 
+def apply_legal_move_mask(policy, legal_move_mask):
+    """
+    Apply the legal move mask to the policy output to ensure that only legal moves are considered.
+    
+    Parameters:
+    - policy: The policy output from the neural network (size: [batch_size, num_possible_moves])
+    - legal_move_mask: A binary mask where 1 indicates a legal move and 0 indicates an illegal move
+    
+    Returns:
+    - masked_policy: The masked policy output with illegal moves set to a very low value (e.g., -inf)
+    """
+    masked_policy = policy + (1 - legal_move_mask) * -1e9  # Set illegal moves to a very low value
+    return masked_policy
+
 #Self play function
-def self_play(model, simulations=10):
+def self_play(model, simulations=10, mcts_simulations=1000):
     board = chess.Board()
     data = []
+    mcts = MCTS(model, simulations=mcts_simulations)
 
     for _ in range(simulations):
         if board.is_game_over():
             break
         encoded_board = encode_board(board)
+        best_move = mcts.select_move(board)
+        if best_move in board.legal_moves:
+            board.push(best_move)
+            data.append((encoded_board, best_move, board.result()))
+        else:
+            print(f"Illegal move detected: {best_move}")
+            break
         
-        # Evaluate each move using the model and store move probabilities
-        move_evals = []
-        for move in board.legal_moves:
-            board.push(move)
-            policy, move_eval = model(encode_board(board))
-            move_evals.append((move, move_eval.item(), policy))
-            board.pop()
-
-        # Select the best move based on the neural network evaluation
-        best_move = max(move_evals, key=lambda x: x[1])[0]
-        best_policy = move_evals[0][2]  # Store the policy vector for the selected move
-
-        data.append((encoded_board, best_policy, board.result()))  # Store board, policy, and result
-        board.push(best_move)
+        display_move_slowly(board, WINDOW, best_move)  # Visualize the move during self-play
 
     return data
-
 
 #Training loop
 def train_model(model, optimizer, criterion, epochs=5, simulations=10):
     for epoch in range(epochs):
-        print(f"Epoch {epoch + 1}/{epochs}")
-
         training_data = []
         for _ in range(simulations):
             training_data.extend(self_play(model, simulations=1))
 
         # Prepare dataset
         X = torch.cat([x[0] for x in training_data])  # Encoded boards
-        policies = torch.stack([x[1] for x in training_data])  # Policy vectors
-        y = torch.tensor([1 if result == "1-0" else -1 if result == "0-1" else 0 for _, _, result in training_data])  # Game results
+        policies = torch.cat([x[1].unsqueeze(0) for x in training_data])  # Policy vectors
+        y = torch.tensor(
+            [1 if result == "1-0" else -1 if result == "0-1" else 0 for _, _, result in training_data]
+        )  # Game results
+
+        if X.shape[0] != policies.shape[0] or X.shape[0] != y.shape[0]:
+            raise ValueError("Inconsistent batch sizes.")
 
         # Training step
         optimizer.zero_grad()
-        
+
         # Forward pass
         predicted_policies, predicted_value = model(X)
-        
+
         # Calculate policy loss (cross-entropy)
-        policy_loss = nn.CrossEntropyLoss()(predicted_policies, policies.argmax(dim=1))  # Argmax to get the target move
-        
+        target_moves = policies.argmax(dim=1)
+        policy_loss = nn.CrossEntropyLoss()(predicted_policies, target_moves)
+
         # Calculate value loss (mean squared error)
         value_loss = nn.MSELoss()(predicted_value.squeeze(), y.float())
-        
+
         # Total loss
         loss = policy_loss + value_loss
         loss.backward()
         optimizer.step()
 
-        print(f"Loss: {loss.item():.4f}")
+        print(f"Epoch {epoch + 1}/{epochs} - Loss: {loss.item():.4f}")
 
-# load piece images
-def load_images():
-    for piece, filename in PIECE_IMAGES.items():
-        try:
-            # Load the image file associated with the piece
-            image = pygame.image.load(f'./assets/{filename}')
-            # Scale the image to fit the square size
-            image = pygame.transform.scale(image, (SQUARE_SIZE, SQUARE_SIZE))
-            # Update the dictionary with the Pygame surface
-            PIECE_IMAGES[piece] = image
-        except FileNotFoundError:
-            print(f"Error: Image file for {piece} not found at './assets/{filename}'!")
+def display_move_slowly(board, window, move):
+    # Placeholder for visualizing moves
+    print(f"Processing move: {move}")
+    board.push(move)  # Apply the move
+    draw_board(window, board)  # Redraw the board
+    pygame.display.flip()
+    pygame.time.wait(500)  # Wait half a second to show the move
 
-player_input = ""
-
-# Add this function to draw the button
-def draw_button(window, x, y, width, height, text):
-    """Draw a button with specified dimensions and text."""
-    pygame.draw.rect(window, (70, 130, 180), (x, y, width, height))  # Button background
-    font = pygame.font.Font(None, 24)
-    text_surface = font.render(text, True, (255, 255, 255))  # Button text
-    text_rect = text_surface.get_rect(center=(x + width // 2, y + height // 2))
-    window.blit(text_surface, text_rect)
-
-# Add this function to handle training
 def train_and_display_moves(model, optimizer, criterion, board, window):
     """Train the model and display moves on the UI during training."""
     training_data = self_play(model, simulations=10)  # Self-play for data generation
 
     for data in training_data:
-        board_tensor, _, _ = data  # Extract board from data
-        board_copy = board.copy()
-        # Decode board_tensor back to a python-chess Board (if necessary)
+        encoded_board, _, _ = data  # Extract board from data
+        best_move = data[0]  # Get the best move from the data (ensure it's a chess.Move)
 
-        # Draw the board to reflect moves
-        draw_board(window, board_copy)
-        pygame.display.flip()
-        pygame.time.wait(500)  # Delay to visualize the move
+        # Ensure best_move is a chess.Move
+        if isinstance(best_move, torch.Tensor):
+            best_move = chess.Move.from_uci(best_move.item())  # Convert from UCI string if needed
 
-    # Perform training step
-    train_model(model, optimizer, criterion, epochs=1, simulations=1)
+        # Display the move slowly on the board
+        display_move_slowly(board, window, best_move, speed=50)
+
+        # After each move, perform the training step
+        train_model(model, optimizer, criterion, epochs=1, simulations=1)
+
+
 
 #Main Function
 if __name__ == "__main__":
@@ -390,12 +428,15 @@ if __name__ == "__main__":
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 # Check if mouse click is within the button bounds
                 mouse_x, mouse_y = event.pos
-                if 500 <= mouse_x <= 600 and 400 <= mouse_y <= 440:  # Button bounds
+                if button_x <= mouse_x <= button_x + button_width and button_y <= mouse_y <= button_y + button_height:
                     train_and_display_moves(model, optimizer, criterion, board, WINDOW)
 
         # Redraw the board, side panel, and button
         draw_board_with_panel(WINDOW, board, player_input)
-        draw_button(WINDOW, 500, 400, 100, 40, "Train")  # Button for training
+        
+        # Draw the "Train" button
+        draw_button(WINDOW, button_x, button_y, button_width, button_height, "Train")
+        
         pygame.display.flip()
 
     pygame.quit()
