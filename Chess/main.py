@@ -53,62 +53,58 @@ class MCTS:
         self.visit_counts = {}
 
     def select_move(self, board):
-        for _ in range(self.simulations):
-            self.simulate(board)
-
         legal_moves = list(board.legal_moves)
+        if not legal_moves:
+            raise ValueError("No legal moves available.")
+        
         move_scores = {}
         for move in legal_moves:
             board.push(move)
-            move_scores[move] = self.q_values.get(board.fen(), 0) / self.visit_counts.get(board.fen(), 1)
+            fen = board.fen()
+            score = self.q_values.get(fen, 0) / max(1, self.visit_counts.get(fen, 1))
+            move_scores[move] = score
             board.pop()
-
-        # Retry if the selected move is illegal
-        best_move = None
-        while best_move is None or best_move not in legal_moves:
-            best_move = max(move_scores, key=move_scores.get)
-
-        if best_move in legal_moves:
-            return best_move
-        else:
-            raise ValueError(f"Illegal move selected: {best_move}")
-
+        
+        best_move = max(move_scores, key=move_scores.get)
+        return best_move
 
     def simulate(self, board):
         if board.is_game_over():
             return self.evaluate_terminal(board)
         
-        board_fen = board.fen()
-        if board_fen not in self.q_values:
-            self.q_values[board_fen] = 0
-            self.visit_counts[board_fen] = 0
+        fen = board.fen()
+        if fen not in self.q_values:
+            self.q_values[fen] = 0
+            self.visit_counts[fen] = 0
             return self.evaluate(board)
 
         legal_moves = list(board.legal_moves)
-        
-        # Ensure the selected move is legal
-        move = random.choice(legal_moves)  # Choose a legal move randomly
+        move = random.choice(legal_moves)
         board.push(move)
         reward = -self.simulate(board)
         board.pop()
 
-        self.q_values[board_fen] += reward
-        self.visit_counts[board_fen] += 1
+        self.q_values[fen] += reward
+        self.visit_counts[fen] += 1
         return reward
 
     def evaluate(self, board):
         board_tensor = encode_board(board)
         policy, nn_eval = self.model(board_tensor)
 
-        # Convert policy to move probabilities
+        # Filter legal moves
         legal_moves = list(board.legal_moves)
-        move_probs = torch.softmax(policy, dim=1).squeeze(0)  # Softmax for move probabilities
+        legal_move_indices = [move.to_square for move in legal_moves]
+        move_probs = torch.softmax(policy, dim=1).squeeze(0)[legal_move_indices]
 
-        # Calculate material evaluation
+        # Normalize probabilities
+        move_probs = move_probs / move_probs.sum()
+        
         white_material, black_material = calculate_material(board)
         material_eval = (white_material - black_material) / 10.0
 
         return nn_eval.item() * 0.7 + material_eval * 0.3
+
 
     def evaluate_terminal(self, board):
         if board.is_checkmate():
@@ -128,6 +124,10 @@ def generate_board(board, depth):
         print("Move:", move)
         print(board)
         generate_board(board, depth - 1)
+
+def debug_board_state(board):
+    print("Current board FEN:", board.fen())
+    print("Legal moves:", list(board.legal_moves))
 
 def draw_board(window, board):
     """
@@ -199,27 +199,18 @@ def draw_board_with_panel(window, board, player_input):
     window.blit(input_text, (WIDTH - 120, 60))
 
 def handle_player_move(board, move_input):
-    """
-    Processes a move input by the player and updates the board.
-    
-    Parameters:
-        board (chess.Board): The current chess board state.
-        move_input (str): Player's move in UCI or algebraic notation.
-    
-    Returns:
-        bool: True if the move is valid, False otherwise.
-    """
     try:
         move = chess.Move.from_uci(move_input)
         if move in board.legal_moves:
             board.push(move)
             return True
         else:
-            print(f"Illegal move: {move_input}")
+            print(f"Illegal move: {move_input} - Not in board.legal_moves.")
             return False
     except ValueError:
-        print("Invalid move format!")
+        print(f"Invalid move format: {move_input}")
         return False
+
 
 # load piece images
 def load_images():
@@ -253,17 +244,20 @@ button_y = 120  # Below the Player Move text
 button_width = 160
 button_height = 40
 
-#Function to encode the different piece boards with 0s and 1s
 def encode_board(board):
-    planes = torch.zeros((14, 8, 8))  # 14 planes for each piece type (12 pieces + 2 additional planes for empty squares)
+    """
+    Encodes a chess board position into a tensor suitable for input to a neural network.
+    """
+    planes = torch.zeros((14, 8, 8))
     for square in chess.SQUARES:
         piece = board.piece_at(square)
         if piece:
-            piece_type = piece.piece_type - 1  # Piece type (1-6), so subtract 1 to index from 0
-            color_offset = 0 if piece.color == chess.WHITE else 6  # Offset for color (0 for white, 6 for black)
-            plane = piece_type + color_offset  # Determine the correct plane
-            planes[plane, square // 8, square % 8] = 1  # Mark the square with the piece type
-    return planes.unsqueeze(0)  # Add a batch dimension to the tensor
+            piece_type = piece.piece_type - 1
+            color_offset = 0 if piece.color == chess.WHITE else 6
+            plane = piece_type + color_offset
+            planes[plane, square // 8, square % 8] = 1
+    return planes.unsqueeze(0)
+
 
 #Determine the Material on both sides 
 def calculate_material(board):
@@ -273,7 +267,8 @@ def calculate_material(board):
         chess.KNIGHT: 3,
         chess.BISHOP: 3,
         chess.ROOK: 5,
-        chess.QUEEN: 9
+        chess.QUEEN: 9,
+        chess.KING: 0
     }
 
     # Initialize the material score
@@ -308,26 +303,30 @@ def apply_legal_move_mask(policy, legal_move_mask):
     return masked_policy
 
 #Self play function
-def self_play(model, simulations=10, mcts_simulations=1000):
+def self_play(model, simulations=10):
     board = chess.Board()
     data = []
-    mcts = MCTS(model, simulations=mcts_simulations)
-
     for _ in range(simulations):
-        if board.is_game_over():
+        mcts = MCTS(model)
+        try:
+            move = mcts.select_move(board)
+            if move not in board.legal_moves:
+                raise ValueError(f"Move {move} is illegal.")
+            
+            # Collect training data
+            board_tensor = encode_board(board)
+            data.append((board_tensor, move))
+            
+            # Apply move and display
+            board.push(move)
+            draw_board(WINDOW, board)
+            pygame.display.flip()
+            pygame.time.wait(500)
+        except ValueError as e:
+            print(f"Error during MCTS simulation: {e}")
             break
-        encoded_board = encode_board(board)
-        best_move = mcts.select_move(board)
-        if best_move in board.legal_moves:
-            board.push(best_move)
-            data.append((encoded_board, best_move, board.result()))
-        else:
-            print(f"Illegal move detected: {best_move}")
-            break
-        
-        display_move_slowly(board, WINDOW, best_move)  # Visualize the move during self-play
-
     return data
+
 
 #Training loop
 def train_model(model, optimizer, criterion, epochs=5, simulations=10):
@@ -337,42 +336,32 @@ def train_model(model, optimizer, criterion, epochs=5, simulations=10):
             training_data.extend(self_play(model, simulations=1))
 
         # Prepare dataset
-        X = torch.cat([x[0] for x in training_data])  # Encoded boards
-        policies = torch.cat([x[1].unsqueeze(0) for x in training_data])  # Policy vectors
-        y = torch.tensor(
-            [1 if result == "1-0" else -1 if result == "0-1" else 0 for _, _, result in training_data]
-        )  # Game results
+        X = torch.cat([x[0] for x in training_data])
+        y = torch.tensor([1 if result == "1-0" else -1 if result == "0-1" else 0 for _, result in training_data])
 
-        if X.shape[0] != policies.shape[0] or X.shape[0] != y.shape[0]:
-            raise ValueError("Inconsistent batch sizes.")
-
-        # Training step
         optimizer.zero_grad()
-
-        # Forward pass
         predicted_policies, predicted_value = model(X)
-
-        # Calculate policy loss (cross-entropy)
-        target_moves = policies.argmax(dim=1)
-        policy_loss = nn.CrossEntropyLoss()(predicted_policies, target_moves)
-
-        # Calculate value loss (mean squared error)
+        policy_loss = nn.CrossEntropyLoss()(predicted_policies, y.argmax(dim=1))
         value_loss = nn.MSELoss()(predicted_value.squeeze(), y.float())
-
-        # Total loss
         loss = policy_loss + value_loss
+
         loss.backward()
         optimizer.step()
-
         print(f"Epoch {epoch + 1}/{epochs} - Loss: {loss.item():.4f}")
 
+
 def display_move_slowly(board, window, move):
-    # Placeholder for visualizing moves
-    print(f"Processing move: {move}")
-    board.push(move)  # Apply the move
-    draw_board(window, board)  # Redraw the board
-    pygame.display.flip()
-    pygame.time.wait(500)  # Wait half a second to show the move
+    try:
+        if move not in board.legal_moves:
+            raise ValueError(f"Move {move} is not legal on the current board.")
+        
+        board.push(move)  # Apply the move
+        draw_board(window, board)
+        pygame.display.flip()
+        pygame.time.wait(500)  # Pause for half a second
+    except ValueError as e:
+        print(f"Error in move display: {e}")
+
 
 def train_and_display_moves(model, optimizer, criterion, board, window):
     """Train the model and display moves on the UI during training."""
